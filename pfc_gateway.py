@@ -203,15 +203,24 @@ def _run_query_local(
     to_dt: datetime | None,
     filter_expr: dict | None,
 ) -> Generator[str, None, None]:
-    """Query a local PFC file. Streams NDJSON lines."""
-    binary = _locate_binary()
-    cmd = [binary, "query"]
+    """Query a local PFC file. Streams NDJSON lines.
 
-    if from_dt:
-        cmd += ["--from", _fmt_ts(from_dt)]
-    if to_dt:
-        cmd += ["--to", _fmt_ts(to_dt)]
-    cmd += ["--out", "-", pfc_path]
+    Uses `pfc_jsonl query --from --to` when a time range is given (block-level
+    index → only needed blocks decompressed).  Falls back to
+    `pfc_jsonl decompress` when no time range is given — full file decompressed,
+    Python-level filter handles field filtering.
+    """
+    binary = _locate_binary()
+
+    if from_dt is not None and to_dt is not None:
+        # Block-level time range query (efficient — only matching blocks read)
+        cmd = [binary, "query",
+               "--from", _fmt_ts(from_dt),
+               "--to",   _fmt_ts(to_dt),
+               "--out",  "-", pfc_path]
+    else:
+        # No time range — full decompress; Python filter handles the rest
+        cmd = [binary, "decompress", pfc_path, "-"]
 
     log.info("Local query: %s", " ".join(cmd))
 
@@ -518,11 +527,40 @@ async def query_batch(req: BatchQueryRequest):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser(
+        prog="pfc-gateway",
+        description="PFC cold archive HTTP REST query server",
+    )
+    parser.add_argument("--host",    default=os.environ.get("PFC_HOST", "0.0.0.0"))
+    parser.add_argument("--port",    type=int, default=int(os.environ.get("PFC_PORT", "8765")))
+    parser.add_argument("--api-key", default=None,
+                        help="API key (overrides PFC_API_KEY env var)")
+    parser.add_argument("--binary",  default=None,
+                        help="Path to pfc_jsonl binary (overrides PFC_JSONL_BINARY env var)")
+    parser.add_argument("--version", action="version", version=f"pfc-gateway {__version__}")
+    args = parser.parse_args()
+
+    # Apply CLI overrides to module-level globals BEFORE uvicorn starts
+    if args.api_key:
+        os.environ["PFC_API_KEY"] = args.api_key
+        # Reload module-level constant
+        import sys
+        sys.modules[__name__].API_KEY = args.api_key
+    if args.binary:
+        os.environ["PFC_JSONL_BINARY"] = args.binary
+        sys.modules[__name__].PFC_JSONL_BINARY = args.binary
+
+    print(f"pfc-gateway {__version__} — listening on {args.host}:{args.port}")
+    print(f"  Binary : {PFC_JSONL_BINARY}")
+    print(f"  Auth   : {'enabled' if API_KEY else 'DISABLED (set PFC_API_KEY or --api-key)'}")
+
     uvicorn.run(
         "pfc_gateway:app",
-        host=os.environ.get("PFC_HOST", "0.0.0.0"),
-        port=int(os.environ.get("PFC_PORT", "8765")),
+        host=args.host,
+        port=args.port,
         reload=False,
         log_level="info",
     )
