@@ -1,0 +1,8 @@
+# Core (required)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0
+python-dateutil>=2.9
+
+# S3 support (optional — needed for s3:// paths)
+boto3>=1.34

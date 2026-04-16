@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# PFC archives (test files)
+*.pfc
+*.pfc.bidx
+*.pfc.idx
+*.jsonl
+
+# Env files (never commit API keys)
+.env
+*.env
