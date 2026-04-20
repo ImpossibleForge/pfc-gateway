@@ -11,7 +11,7 @@ Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
 ## What it does
 
 ```
-[Grafana / Python / curl / PowerBI / your own CrateDB UI]
+[Grafana / Python / curl / PowerBI / your own tools]
           │
           ▼  HTTP REST — no client library needed
      pfc-gateway  (this server)
@@ -23,7 +23,7 @@ Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
      NDJSON stream back to client
 ```
 
-**One CrateDB query → cold S3 data → back in seconds.** No re-import. No DuckDB.
+**One query → cold S3 data → back in seconds.** No re-import. No DuckDB.
 
 ---
 
@@ -57,7 +57,7 @@ curl -s \
   -H "Content-Type: application/json" \
   -X POST http://localhost:8765/query \
   -d '{
-    "file":    "s3://my-cratedb-archive/pfc/logs_2026-03.pfc",
+    "file":    "s3://my-archive/pfc/logs_2026-03.pfc",
     "from_ts": "2026-03-05T10:00:00Z",
     "to_ts":   "2026-03-05T12:00:00Z",
     "filter":  {"level": "ERROR"}
@@ -89,7 +89,7 @@ resp = requests.post(
     "http://localhost:8765/query",
     headers={"X-API-Key": "your-secret-key"},
     json={
-        "file":    "s3://my-cratedb-archive/pfc/logs_2026-03.pfc",
+        "file":    "s3://my-archive/pfc/logs_2026-03.pfc",
         "from_ts": "2026-03-05T10:00Z",
         "to_ts":   "2026-03-05T12:00Z",
     },
@@ -137,19 +137,19 @@ pfc-gateway implements the [Grafana SimpleJSON data source](https://grafana.com/
 5. Save & Test → should show "Data source is working"
 
 **In a dashboard panel:**
-- Target: `s3://my-cratedb-archive/pfc/logs_2026-03.pfc`
+- Target: `s3://my-archive/pfc/logs_2026-03.pfc`
 - Optional filter: `s3://my-archive/logs.pfc|{"level":"ERROR"}`
 
 Grafana's time range picker controls `from_ts` and `to_ts` automatically.
 
 ---
 
-## CrateDB: Live data + cold archives in one dashboard
+## Live DB + cold archives in one dashboard
 
-**Without pfc-gateway:**  Only the last 30 days (hot CrateDB data) visible in Grafana.
+**Without pfc-gateway:**  Only the last 30 days (hot live data) visible in Grafana.
 
 **With pfc-gateway:**
-- Panel 1: Live CrateDB data source (last 30 days)
+- Panel 1: Live DB data source (last 30 days)
 - Panel 2: pfc-gateway data source (months/years of cold PFC archives)
 
 Both panels in the same Grafana dashboard. No re-import. No DuckDB.
@@ -239,7 +239,7 @@ docker run -d \
 ## Architecture in the full PFC ecosystem
 
 ```
-CrateDB (hot, last N days)
+Your DB (hot, last N days)
     │
     ├── pfc-migrate cratedb   (one-shot export)
     └── pfc-archiver          (autonomous daemon, runs hourly)
@@ -270,7 +270,7 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 ## Related repos
 
 - [pfc-jsonl](https://github.com/ImpossibleForge/pfc-jsonl) — core binary (compress/decompress/query)
-- [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot CrateDB export
+- [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot JSONL export
 - [pfc-archiver](https://github.com/ImpossibleForge/pfc-archiver) — autonomous archive daemon
 
 ---
