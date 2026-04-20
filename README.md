@@ -247,7 +247,7 @@ docker run -d \
 Your DB (hot, last N days)
     │
     ├── pfc-migrate           (one-shot export)
-    └── pfc-archiver          (autonomous daemon, runs hourly)
+    └── pfc-archiver-cratedb  (autonomous daemon, runs hourly)
               │
               ▼
     S3: logs_2026-03.pfc + .bidx + .idx
@@ -266,7 +266,7 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 | Tool | What | DuckDB needed |
 |------|------|---------------|
 | `pfc-migrate` | Export your DB → S3 | No |
-| `pfc-archiver` | Autonomous archive daemon | No |
+| `pfc-archiver-cratedb` | Autonomous archive daemon | No |
 | `pfc-duckdb` | SQL queries on PFC files | Yes |
 | **`pfc-gateway`** | **HTTP REST — any tool** | **No** |
 
@@ -276,7 +276,7 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 
 - [pfc-jsonl](https://github.com/ImpossibleForge/pfc-jsonl) — core binary (compress/decompress/query)
 - [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot JSONL export
-- [pfc-archiver](https://github.com/ImpossibleForge/pfc-archiver) — autonomous archive daemon
+- [pfc-archiver-cratedb](https://github.com/ImpossibleForge/pfc-archiver-cratedb) — autonomous archive daemon
 
 ---
 
