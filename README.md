@@ -4,7 +4,7 @@
 
 pfc-gateway makes PFC archives on S3 (or local storage) queryable by **any tool** — Grafana, Python, curl, PowerBI — through a simple HTTP API. No client library, no DuckDB, no special setup on the query side.
 
-Part of the [PFC Ecosystem](https://github.com/ImpossibleForge) for CrateDB cold storage.
+Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
 
 ---
 
