@@ -1,5 +1,22 @@
 # Changelog — pfc-gateway
 
+## v0.1.1 (2026-04-20)
+
+### Fixed
+- **Eager error-checking in query generators** — `_run_query_local` and `_run_query_s3`
+  were generator functions, so `_locate_binary()` and S3 pre-signing ran lazily during
+  `StreamingResponse` iteration. A missing binary or S3 auth failure was not caught by
+  the endpoint's `except RuntimeError` handler — the gateway silently returned HTTP 200
+  with an empty body instead of 500.  
+  Fixed by making both functions regular functions that perform eager checks upfront, then
+  return a nested `_gen()` generator for the actual streaming.
+
+### Added
+- Full test suite: `tests/test_gateway.py` (59 tests) and `tests/test_resilience.py`
+  (28 resilience / edge-case tests). 87 tests total, all passing.
+
+---
+
 ## v0.1.0 (2026-04-16)
 
 Initial release.
