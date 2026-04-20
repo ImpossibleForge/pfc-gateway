@@ -31,7 +31,12 @@ Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
 
 ```bash
 # 1. Install pfc_jsonl binary (required)
+# Linux x64:
 curl -L https://github.com/ImpossibleForge/pfc-jsonl/releases/latest/download/pfc_jsonl-linux-x64 \
+     -o /usr/local/bin/pfc_jsonl && chmod +x /usr/local/bin/pfc_jsonl
+
+# macOS (Apple Silicon / M1–M4):
+curl -L https://github.com/ImpossibleForge/pfc-jsonl/releases/latest/download/pfc_jsonl-macos-arm64 \
      -o /usr/local/bin/pfc_jsonl && chmod +x /usr/local/bin/pfc_jsonl
 
 # 2. Install pfc-gateway
