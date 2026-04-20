@@ -244,13 +244,14 @@ docker run -d \
 ## Architecture in the full PFC ecosystem
 
 ```
-Your DB (hot, last N days)
+Your data sources
     │
-    ├── pfc-migrate           (one-shot export)
-    └── pfc-archiver-cratedb  (autonomous daemon, runs hourly)
+    ├── pfc-migrate     (one-shot export)
+    ├── pfc-archiver-*  (autonomous daemon)
+    └── pfc-fluentbit   (live pipeline)
               │
               ▼
-    S3: logs_2026-03.pfc + .bidx + .idx
+    .pfc archives (local / S3 / Azure / GCS)
               │
     ┌─────────┴──────────┐
     │                    │
@@ -265,8 +266,9 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 
 | Tool | What | DuckDB needed |
 |------|------|---------------|
-| `pfc-migrate` | Export your DB → S3 | No |
-| `pfc-archiver-cratedb` | Autonomous archive daemon | No |
+| `pfc-migrate` | One-shot export to `.pfc` | No |
+| `pfc-archiver-*` | Autonomous archive daemon | No |
+| `pfc-fluentbit` | Live pipeline → `.pfc` | No |
 | `pfc-duckdb` | SQL queries on PFC files | Yes |
 | **`pfc-gateway`** | **HTTP REST — any tool** | **No** |
 
@@ -275,8 +277,9 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 ## Related repos
 
 - [pfc-jsonl](https://github.com/ImpossibleForge/pfc-jsonl) — core binary (compress/decompress/query)
-- [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot JSONL export
-- [pfc-archiver-cratedb](https://github.com/ImpossibleForge/pfc-archiver-cratedb) — autonomous archive daemon
+- [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot export and archive conversion
+- [pfc-fluentbit](https://github.com/ImpossibleForge/pfc-fluentbit) — live Fluent Bit → PFC pipeline
+- [pfc-duckdb](https://github.com/ImpossibleForge/pfc-duckdb) — DuckDB extension for SQL queries on PFC files
 
 ---
 
