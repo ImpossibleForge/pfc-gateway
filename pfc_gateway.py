@@ -40,7 +40,7 @@ Usage
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 import json
 import logging
@@ -209,43 +209,49 @@ def _run_query_local(
     index → only needed blocks decompressed).  Falls back to
     `pfc_jsonl decompress` when no time range is given — full file decompressed,
     Python-level filter handles field filtering.
+
+    Binary existence is checked eagerly (before the generator runs) so that a
+    missing binary raises RuntimeError at call time, not during streaming.
     """
-    binary = _locate_binary()
+    binary = _locate_binary()  # ← eager: RuntimeError here if binary is missing
 
-    if from_dt is not None and to_dt is not None:
-        # Block-level time range query (efficient — only matching blocks read)
-        cmd = [binary, "query",
-               "--from", _fmt_ts(from_dt),
-               "--to",   _fmt_ts(to_dt),
-               "--out",  "-", pfc_path]
-    else:
-        # No time range — full decompress; Python filter handles the rest
-        cmd = [binary, "decompress", pfc_path, "-"]
+    def _gen() -> Generator[str, None, None]:
+        if from_dt is not None and to_dt is not None:
+            # Block-level time range query (efficient — only matching blocks read)
+            cmd = [binary, "query",
+                   "--from", _fmt_ts(from_dt),
+                   "--to",   _fmt_ts(to_dt),
+                   "--out",  "-", pfc_path]
+        else:
+            # No time range — full decompress; Python filter handles the rest
+            cmd = [binary, "decompress", pfc_path, "-"]
 
-    log.info("Local query: %s", " ".join(cmd))
+        log.info("Local query: %s", " ".join(cmd))
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
-    try:
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _row_in_range(row, from_dt, to_dt) and _apply_filter(row, filter_expr):
-                yield json.dumps(row, ensure_ascii=False) + "\n"
-    finally:
-        proc.stdout.close()
-        proc.wait()
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _row_in_range(row, from_dt, to_dt) and _apply_filter(row, filter_expr):
+                    yield json.dumps(row, ensure_ascii=False) + "\n"
+        finally:
+            proc.stdout.close()
+            proc.wait()
 
-    if proc.returncode not in (0, None):
-        stderr = proc.stderr.read()
-        log.warning("pfc_jsonl exited %d: %s", proc.returncode, stderr[:500])
+        if proc.returncode not in (0, None):
+            stderr = proc.stderr.read()
+            log.warning("pfc_jsonl exited %d: %s", proc.returncode, stderr[:500])
+
+    return _gen()
 
 
 def _run_query_s3(
@@ -255,12 +261,18 @@ def _run_query_s3(
     filter_expr: dict | None,
     aws_profile: str | None = None,
 ) -> Generator[str, None, None]:
-    """Query a PFC file on S3 using pfc_jsonl s3-fetch (HTTP Range only)."""
-    binary = _locate_binary()
+    """Query a PFC file on S3 using pfc_jsonl s3-fetch (HTTP Range only).
+
+    Binary check and S3 pre-signing happen eagerly (before the generator runs)
+    so that auth failures or a missing binary raise RuntimeError at call time,
+    not silently mid-stream.
+    """
+    binary = _locate_binary()  # ← eager: RuntimeError if binary is missing
     bucket, key = _parse_s3_path(pfc_s3_path)
     idx_key = key + ".idx"
 
-    # Generate pre-signed URLs (boto3 server-side only — pfc_jsonl fetches via HTTPS)
+    # Generate pre-signed URLs eagerly — failure raises RuntimeError here,
+    # which the /query endpoint catches and converts to HTTP 500.
     session = boto3.Session(profile_name=aws_profile, region_name=AWS_REGION)
     s3 = session.client("s3")
 
@@ -270,35 +282,37 @@ def _run_query_s3(
     except (BotoCoreError, ClientError) as exc:
         raise RuntimeError(f"Failed to generate pre-signed URLs: {exc}") from exc
 
-    cmd = [binary, "s3-fetch"]
-    if from_dt:
-        cmd += ["--from", _fmt_ts(from_dt), "--to", _fmt_ts(to_dt or from_dt)]
-        cmd += ["--idx-url", idx_url]
-    else:
-        cmd += ["--all"]
-    cmd += ["--out", "-", pfc_url]
+    log.info("S3 query: bucket=%s key=%s from=%s to=%s", bucket, key, from_dt, to_dt)
 
-    log.info("S3 query: bucket=%s key=%s from=%s to=%s",
-             bucket, key, from_dt, to_dt)
+    def _gen() -> Generator[str, None, None]:
+        cmd = [binary, "s3-fetch"]
+        if from_dt:
+            cmd += ["--from", _fmt_ts(from_dt), "--to", _fmt_ts(to_dt or from_dt)]
+            cmd += ["--idx-url", idx_url]
+        else:
+            cmd += ["--all"]
+        cmd += ["--out", "-", pfc_url]
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
-    try:
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _row_in_range(row, from_dt, to_dt) and _apply_filter(row, filter_expr):
-                yield json.dumps(row, ensure_ascii=False) + "\n"
-    finally:
-        proc.stdout.close()
-        proc.wait()
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _row_in_range(row, from_dt, to_dt) and _apply_filter(row, filter_expr):
+                    yield json.dumps(row, ensure_ascii=False) + "\n"
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    return _gen()
 
 
 # ---------------------------------------------------------------------------
