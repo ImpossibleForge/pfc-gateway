@@ -241,7 +241,7 @@ docker run -d \
 ```
 Your DB (hot, last N days)
     │
-    ├── pfc-migrate cratedb   (one-shot export)
+    ├── pfc-migrate           (one-shot export)
     └── pfc-archiver          (autonomous daemon, runs hourly)
               │
               ▼
@@ -260,7 +260,7 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 
 | Tool | What | DuckDB needed |
 |------|------|---------------|
-| `pfc-migrate cratedb` | Export CrateDB → S3 | No |
+| `pfc-migrate` | Export your DB → S3 | No |
 | `pfc-archiver` | Autonomous archive daemon | No |
 | `pfc-duckdb` | SQL queries on PFC files | Yes |
 | **`pfc-gateway`** | **HTTP REST — any tool** | **No** |
