@@ -1,8 +1,19 @@
 """
-pfc-gateway v0.1.0 — HTTP REST query server for PFC cold archives.
+pfc-gateway v0.2.0 — Bidirectional HTTP gateway for PFC cold archives.
 
-Makes PFC archives queryable by ANY tool — Grafana, Python, curl, PowerBI —
-without requiring DuckDB or any client library beyond basic HTTP.
+Query side  — stream NDJSON out of PFC files (local or S3)
+Ingest side — receive NDJSON / JSON from any HTTP source and compress to PFC
+
+Query endpoints
+---------------
+  POST /query        — query a single PFC file by time range, stream NDJSON
+  POST /query/batch  — query multiple PFC files in one request
+
+Ingest endpoints
+----------------
+  POST /ingest        — receive rows (JSON array, NDJSON, or {"rows":[…]})
+  POST /ingest/flush  — force-compress the current buffer to a .pfc file
+  GET  /ingest/status — buffer stats (rows, bytes, age, last file)
 
 Supported query paths
 ---------------------
@@ -11,43 +22,46 @@ Supported query paths
 
 Architecture
 ------------
-  Client  →  POST /query (JSON body)
-          →  pfc-gateway generates pre-signed URLs (S3 mode)
-          →  pfc_jsonl s3-fetch --from --to (downloads only needed blocks)
-          →  pfc-gateway row-filters + streams NDJSON back
+  Ingest: Fluent Bit / Vector / Telegraf / curl
+          → POST /ingest  → append to .pfc_buffer.jsonl
+          → rotate (size or time) → pfc_jsonl compress → ingest_<ts>.pfc
+
+  Query:  Client → POST /query → pfc_jsonl s3-fetch / query → NDJSON stream
 
 Grafana SimpleJSON Data Source is also supported:
-  GET  /            → health check
-  POST /search      → list available metrics (file paths)
-  POST /query       → time series or table data
-  POST /annotations → empty (not implemented)
+  GET  /grafana           → health check
+  POST /grafana/search    → list targets
+  POST /grafana/query     → table response
+  POST /grafana/annotations → stub
 
 Usage
 -----
   pip install fastapi uvicorn boto3 python-dateutil
-  PFC_API_KEY=secret uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
+  PFC_API_KEY=secret PFC_INGEST_DIR=/data/ingest \\
+    uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
+
+  # Ingest NDJSON from Fluent Bit / Vector / curl
+  curl -H "X-API-Key: secret" -X POST http://localhost:8765/ingest \\
+    -H "Content-Type: application/json" \\
+    -d '[{"ts":"2026-04-21T10:00:00Z","level":"INFO","msg":"hello"}]'
 
   # Query a local file
   curl -H "X-API-Key: secret" -X POST http://localhost:8765/query \\
     -H "Content-Type: application/json" \\
     -d '{"file":"path/to/logs.pfc","from_ts":"2026-03-01T00:00Z","to_ts":"2026-03-02T00:00Z"}'
-
-  # Query an S3 file
-  curl -H "X-API-Key: secret" -X POST http://localhost:8765/query \\
-    -H "Content-Type: application/json" \\
-    -d '{"file":"s3://my-bucket/logs_march.pfc","from_ts":"2026-03-05T10:00Z","to_ts":"2026-03-05T12:00Z"}'
 """
 
 from __future__ import annotations
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
+import asyncio
 import json
 import logging
 import os
 import shutil
 import subprocess
-import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
@@ -76,6 +90,12 @@ PRESIGN_TTL: int = int(os.environ.get("PFC_PRESIGN_TTL", "3600"))  # seconds
 
 AWS_REGION: str = os.environ.get("AWS_DEFAULT_REGION", "eu-central-1")
 
+# Ingest config — all disabled when PFC_INGEST_DIR is not set
+INGEST_DIR: str | None = os.environ.get("PFC_INGEST_DIR")
+INGEST_ROTATE_MB: int  = int(os.environ.get("PFC_INGEST_ROTATE_MB", "64"))
+INGEST_ROTATE_SEC: int = int(os.environ.get("PFC_INGEST_ROTATE_SEC", "3600"))
+INGEST_PREFIX: str     = os.environ.get("PFC_INGEST_PREFIX", "ingest")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -90,8 +110,8 @@ log = logging.getLogger("pfc-gateway")
 app = FastAPI(
     title="pfc-gateway",
     version=__version__,
-    description="HTTP REST query server for PFC cold archives. "
-                "Query PFC files on S3 or local storage without DuckDB.",
+    description="Bidirectional HTTP gateway for PFC cold archives. "
+                "Ingest NDJSON from any HTTP source; query PFC files on S3 or local storage.",
 )
 
 # ---------------------------------------------------------------------------
@@ -316,6 +336,131 @@ def _run_query_s3(
 
 
 # ---------------------------------------------------------------------------
+# Ingest — global state
+# ---------------------------------------------------------------------------
+
+_ingest_lock: asyncio.Lock | None = None
+_ingest_buffer: Path | None = None       # .pfc_buffer.jsonl
+_ingest_row_count: int = 0               # rows in current buffer
+_ingest_last_flush: float = 0.0          # time.time() of last successful flush
+_ingest_last_file: str = ""              # path of last compressed .pfc output
+
+
+# ---------------------------------------------------------------------------
+# Ingest — background helpers
+# ---------------------------------------------------------------------------
+
+async def _flush_buffer_locked(reason: str = "manual") -> dict:
+    """Compress the current buffer to a .pfc file.
+
+    MUST be called with *_ingest_lock held*.
+    Renames buffer → .compressing, runs `pfc_jsonl compress`, removes temp.
+    On error the buffer is restored so no data is lost.
+    """
+    global _ingest_row_count, _ingest_last_flush, _ingest_last_file
+
+    if _ingest_buffer is None or not _ingest_buffer.exists() or _ingest_row_count == 0:
+        return {"flushed": False, "reason": "empty"}
+
+    ts_str   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    tmp_path = _ingest_buffer.with_suffix(".compressing")
+    out_path = Path(INGEST_DIR) / f"{INGEST_PREFIX}_{ts_str}.pfc"
+
+    rows_snapshot     = _ingest_row_count
+    _ingest_buffer.rename(tmp_path)
+    _ingest_row_count = 0
+    _ingest_last_flush = time.time()
+
+    # Check binary eagerly before spawning subprocess
+    try:
+        binary = _locate_binary()
+    except RuntimeError as exc:
+        tmp_path.rename(_ingest_buffer)
+        _ingest_row_count = rows_snapshot
+        log.error("Ingest flush aborted — binary missing: %s", exc)
+        return {"flushed": False, "reason": str(exc)}
+
+    proc = await asyncio.create_subprocess_exec(
+        binary, "compress", str(tmp_path), str(out_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr_bytes = await proc.communicate()
+
+    if proc.returncode != 0:
+        err_msg = stderr_bytes.decode("utf-8", errors="replace")[:300]
+        log.error("pfc_jsonl compress failed (rc=%d): %s", proc.returncode, err_msg)
+        # Restore buffer — data not lost
+        tmp_path.rename(_ingest_buffer)
+        _ingest_row_count = rows_snapshot
+        return {"flushed": False, "reason": "compress_error", "detail": err_msg}
+
+    # Success — clean up temp file
+    try:
+        tmp_path.unlink()
+    except Exception:
+        pass
+
+    _ingest_last_file = str(out_path)
+    log.info("Ingest flush (%s): %d rows → %s", reason, rows_snapshot, out_path.name)
+    return {"flushed": True, "rows": rows_snapshot, "file": str(out_path)}
+
+
+async def _maybe_flush() -> None:
+    """Check size threshold and flush if needed.
+
+    MUST be called with *_ingest_lock held*.
+    """
+    if _ingest_buffer is None or not _ingest_buffer.exists():
+        return
+    size_mb = _ingest_buffer.stat().st_size / (1024 * 1024)
+    if size_mb >= INGEST_ROTATE_MB:
+        log.info("Ingest: size threshold %.1f MB >= %d MB, rotating", size_mb, INGEST_ROTATE_MB)
+        await _flush_buffer_locked("size")
+
+
+async def _rotation_watchdog() -> None:
+    """Background coroutine: flush buffer when time threshold is reached."""
+    while True:
+        await asyncio.sleep(60)
+        if _ingest_lock is None:
+            return
+        async with _ingest_lock:
+            if _ingest_row_count == 0:
+                continue
+            age = time.time() - _ingest_last_flush
+            if age >= INGEST_ROTATE_SEC:
+                log.info("Ingest watchdog: age %.0fs >= %ds, rotating", age, INGEST_ROTATE_SEC)
+                await _flush_buffer_locked("time")
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+async def _startup() -> None:
+    global _ingest_lock, _ingest_buffer, _ingest_row_count, _ingest_last_flush
+
+    if INGEST_DIR is None:
+        log.info("Ingest disabled (set PFC_INGEST_DIR to enable)")
+        return
+
+    Path(INGEST_DIR).mkdir(parents=True, exist_ok=True)
+    _ingest_lock       = asyncio.Lock()
+    _ingest_buffer     = Path(INGEST_DIR) / ".pfc_buffer.jsonl"
+    _ingest_row_count  = 0
+    _ingest_last_flush = time.time()
+
+    asyncio.create_task(_rotation_watchdog())
+
+    log.info(
+        "Ingest enabled: dir=%s  rotate_mb=%d  rotate_sec=%d",
+        INGEST_DIR, INGEST_ROTATE_MB, INGEST_ROTATE_SEC,
+    )
+
+
+# ---------------------------------------------------------------------------
 # REST models
 # ---------------------------------------------------------------------------
 
@@ -334,8 +479,16 @@ class QueryRequest(BaseModel):
         return v
 
 
+class BatchQueryRequest(BaseModel):
+    files: list[str]
+    from_ts: Optional[str] = None
+    to_ts: Optional[str] = None
+    filter: Optional[dict[str, Any]] = None
+    aws_profile: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints — query
 # ---------------------------------------------------------------------------
 
 @app.get("/", dependencies=[Depends(require_api_key)])
@@ -351,10 +504,10 @@ async def query(req: QueryRequest):
     Returns an NDJSON stream — one JSON object per line.
 
     Body:
-      file      : local path or s3://bucket/key.pfc
-      from_ts   : ISO 8601 start time (inclusive)
-      to_ts     : ISO 8601 end time (exclusive)
-      filter    : optional equality filter {"level": "ERROR"}
+      file        : local path or s3://bucket/key.pfc
+      from_ts     : ISO 8601 start time (inclusive)
+      to_ts       : ISO 8601 end time (exclusive)
+      filter      : optional equality filter {"level": "ERROR"}
       aws_profile : optional AWS profile name (S3 mode)
     """
     try:
@@ -374,6 +527,182 @@ async def query(req: QueryRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
     return StreamingResponse(gen, media_type="application/x-ndjson")
+
+
+@app.post("/query/batch", dependencies=[Depends(require_api_key)])
+async def query_batch(req: BatchQueryRequest):
+    """
+    Query multiple PFC files in one request and stream combined NDJSON.
+    Files are queried in order — useful for multi-month archives.
+
+    Body:
+      files       : list of local paths or s3:// URIs ending in .pfc
+      from_ts     : ISO 8601 start (inclusive)
+      to_ts       : ISO 8601 end (exclusive)
+      filter      : optional equality filter
+      aws_profile : optional AWS profile name
+    """
+    try:
+        from_dt = _parse_ts(req.from_ts)
+        to_dt   = _parse_ts(req.to_ts)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp: {exc}")
+
+    def _combined_gen():
+        for f in req.files:
+            if not f.endswith(".pfc"):
+                continue
+            try:
+                gen = (
+                    _run_query_s3(f, from_dt, to_dt, req.filter, req.aws_profile)
+                    if _is_s3(f)
+                    else _run_query_local(f, from_dt, to_dt, req.filter)
+                )
+                yield from gen
+            except Exception as exc:
+                log.warning("Skipping %s: %s", f, exc)
+
+    return StreamingResponse(_combined_gen(), media_type="application/x-ndjson")
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — ingest
+# ---------------------------------------------------------------------------
+
+@app.post("/ingest", dependencies=[Depends(require_api_key)])
+async def ingest(request: Request):
+    """
+    Receive rows and append to the ingest buffer.
+
+    Accepts three body formats (auto-detected):
+      - JSON array:               [{...}, {...}, ...]
+      - Object with "rows" key:   {"rows": [{...}, ...]}
+      - Raw NDJSON:               {...}\\n{...}\\n...
+
+    Compatible with Fluent Bit HTTP output, Vector HTTP sink,
+    Telegraf HTTP output, and plain curl.
+
+    Returns: {"accepted": N}
+
+    Requires PFC_INGEST_DIR to be set (otherwise 503).
+    """
+    if _ingest_lock is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingest not enabled. Set PFC_INGEST_DIR environment variable.",
+        )
+
+    body = await request.body()
+    if not body or not body.strip():
+        return {"accepted": 0}
+
+    body_text = body.decode("utf-8", errors="replace")
+    rows: list[dict] = []
+    parse_succeeded = False   # True once we confirm the body is valid JSON/NDJSON
+
+    # Try structured JSON first (array or {"rows": [...]})
+    stripped = body_text.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = json.loads(body_text)
+            parse_succeeded = True            # valid JSON — even if zero dict rows
+            if isinstance(parsed, list):
+                rows = [r for r in parsed if isinstance(r, dict)]
+            elif isinstance(parsed, dict):
+                if "rows" in parsed and isinstance(parsed["rows"], list):
+                    rows = [r for r in parsed["rows"] if isinstance(r, dict)]
+                else:
+                    rows = [parsed]  # single object body
+        except json.JSONDecodeError:
+            pass
+
+    # Fall back to NDJSON (line-by-line)
+    if not parse_succeeded:
+        for line in body_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    rows.append(obj)
+                    parse_succeeded = True
+            except json.JSONDecodeError:
+                continue
+
+    if not parse_succeeded:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid JSON objects found in request body. "
+                   "Expected JSON array, {\"rows\":[...]}, or NDJSON.",
+        )
+
+    if not rows:
+        return {"accepted": 0}
+
+    async with _ingest_lock:
+        global _ingest_row_count
+        with _ingest_buffer.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _ingest_row_count += len(rows)
+        await _maybe_flush()
+
+    return {"accepted": len(rows)}
+
+
+@app.post("/ingest/flush", dependencies=[Depends(require_api_key)])
+async def ingest_flush():
+    """
+    Force-compress the current ingest buffer to a .pfc file immediately.
+
+    Returns the flush result:
+      {"flushed": true,  "rows": N, "file": "/path/to/ingest_<ts>.pfc"}
+      {"flushed": false, "reason": "empty"}
+    """
+    if _ingest_lock is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingest not enabled. Set PFC_INGEST_DIR environment variable.",
+        )
+    async with _ingest_lock:
+        result = await _flush_buffer_locked("manual")
+    return result
+
+
+@app.get("/ingest/status", dependencies=[Depends(require_api_key)])
+async def ingest_status():
+    """
+    Return current ingest buffer statistics.
+
+      enabled         : false when PFC_INGEST_DIR is not set
+      buffer_rows     : rows currently in the buffer
+      buffer_bytes    : buffer file size in bytes
+      buffer_mb       : buffer file size in MB
+      last_flush_age_sec : seconds since last successful flush
+      last_file       : path of the last compressed .pfc file
+      rotate_mb       : size rotation threshold (MB)
+      rotate_sec      : time rotation threshold (seconds)
+      ingest_dir      : configured ingest directory
+    """
+    if _ingest_lock is None:
+        return {"enabled": False}
+
+    buf_bytes = 0
+    if _ingest_buffer and _ingest_buffer.exists():
+        buf_bytes = _ingest_buffer.stat().st_size
+
+    return {
+        "enabled":            True,
+        "buffer_rows":        _ingest_row_count,
+        "buffer_bytes":       buf_bytes,
+        "buffer_mb":          round(buf_bytes / (1024 * 1024), 3),
+        "last_flush_age_sec": round(time.time() - _ingest_last_flush, 1),
+        "last_file":          _ingest_last_file,
+        "rotate_mb":          INGEST_ROTATE_MB,
+        "rotate_sec":         INGEST_ROTATE_SEC,
+        "ingest_dir":         INGEST_DIR,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -489,54 +818,6 @@ async def grafana_annotations(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Multi-file batch query
-# ---------------------------------------------------------------------------
-
-class BatchQueryRequest(BaseModel):
-    files: list[str]
-    from_ts: Optional[str] = None
-    to_ts: Optional[str] = None
-    filter: Optional[dict[str, Any]] = None
-    aws_profile: Optional[str] = None
-
-
-@app.post("/query/batch", dependencies=[Depends(require_api_key)])
-async def query_batch(req: BatchQueryRequest):
-    """
-    Query multiple PFC files in one request and stream combined NDJSON.
-    Files are queried in order — useful for multi-month archives.
-
-    Body:
-      files     : list of local paths or s3:// URIs ending in .pfc
-      from_ts   : ISO 8601 start (inclusive)
-      to_ts     : ISO 8601 end (exclusive)
-      filter    : optional equality filter
-      aws_profile : optional AWS profile name
-    """
-    try:
-        from_dt = _parse_ts(req.from_ts)
-        to_dt   = _parse_ts(req.to_ts)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid timestamp: {exc}")
-
-    def _combined_gen():
-        for f in req.files:
-            if not f.endswith(".pfc"):
-                continue
-            try:
-                gen = (
-                    _run_query_s3(f, from_dt, to_dt, req.filter, req.aws_profile)
-                    if _is_s3(f)
-                    else _run_query_local(f, from_dt, to_dt, req.filter)
-                )
-                yield from gen
-            except Exception as exc:
-                log.warning("Skipping %s: %s", f, exc)
-
-    return StreamingResponse(_combined_gen(), media_type="application/x-ndjson")
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -546,30 +827,35 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         prog="pfc-gateway",
-        description="PFC cold archive HTTP REST query server",
+        description="PFC cold archive HTTP REST gateway (bidirectional: query + ingest)",
     )
-    parser.add_argument("--host",    default=os.environ.get("PFC_HOST", "0.0.0.0"))
-    parser.add_argument("--port",    type=int, default=int(os.environ.get("PFC_PORT", "8765")))
-    parser.add_argument("--api-key", default=None,
+    parser.add_argument("--host",       default=os.environ.get("PFC_HOST", "0.0.0.0"))
+    parser.add_argument("--port",       type=int, default=int(os.environ.get("PFC_PORT", "8765")))
+    parser.add_argument("--api-key",    default=None,
                         help="API key (overrides PFC_API_KEY env var)")
-    parser.add_argument("--binary",  default=None,
+    parser.add_argument("--binary",     default=None,
                         help="Path to pfc_jsonl binary (overrides PFC_JSONL_BINARY env var)")
-    parser.add_argument("--version", action="version", version=f"pfc-gateway {__version__}")
+    parser.add_argument("--ingest-dir", default=None,
+                        help="Enable ingest and write buffers here (overrides PFC_INGEST_DIR)")
+    parser.add_argument("--version",    action="version", version=f"pfc-gateway {__version__}")
     args = parser.parse_args()
 
-    # Apply CLI overrides to module-level globals BEFORE uvicorn starts
+    import sys
+
     if args.api_key:
         os.environ["PFC_API_KEY"] = args.api_key
-        # Reload module-level constant
-        import sys
         sys.modules[__name__].API_KEY = args.api_key
     if args.binary:
         os.environ["PFC_JSONL_BINARY"] = args.binary
         sys.modules[__name__].PFC_JSONL_BINARY = args.binary
+    if args.ingest_dir:
+        os.environ["PFC_INGEST_DIR"] = args.ingest_dir
+        sys.modules[__name__].INGEST_DIR = args.ingest_dir
 
     print(f"pfc-gateway {__version__} — listening on {args.host}:{args.port}")
-    print(f"  Binary : {PFC_JSONL_BINARY}")
-    print(f"  Auth   : {'enabled' if API_KEY else 'DISABLED (set PFC_API_KEY or --api-key)'}")
+    print(f"  Binary     : {PFC_JSONL_BINARY}")
+    print(f"  Auth       : {'enabled' if API_KEY else 'DISABLED (set PFC_API_KEY or --api-key)'}")
+    print(f"  Ingest     : {INGEST_DIR or 'disabled (set PFC_INGEST_DIR or --ingest-dir)'}")
 
     uvicorn.run(
         "pfc_gateway:app",

@@ -1,8 +1,8 @@
 # pfc-gateway
 
-**HTTP REST query server for PFC cold archives — no DuckDB required.**
+**Bidirectional HTTP gateway for PFC cold archives — no DuckDB required.**
 
-pfc-gateway makes PFC archives on S3 (or local storage) queryable by **any tool** — Grafana, Python, curl, PowerBI — through a simple HTTP API. No client library, no DuckDB, no special setup on the query side.
+pfc-gateway makes PFC archives on S3 (or local storage) queryable by **any tool** — Grafana, Python, curl, PowerBI — through a simple HTTP API. It also **receives** NDJSON from Fluent Bit, Vector, Telegraf, or any HTTP client and compresses it to `.pfc` archives automatically.
 
 Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
 
@@ -11,19 +11,27 @@ Part of the [PFC Ecosystem](https://github.com/ImpossibleForge).
 ## What it does
 
 ```
+[Fluent Bit / Vector / Telegraf / curl]
+          │
+          ▼  POST /ingest — push NDJSON rows
+     pfc-gateway  (this server)  ←─────────── also receives data
+          │
+          ├── .pfc_buffer.jsonl  (live buffer)
+          └── ingest_<ts>.pfc    (auto-rotated on size or time)
+
 [Grafana / Python / curl / PowerBI / your own tools]
           │
-          ▼  HTTP REST — no client library needed
-     pfc-gateway  (this server)
+          ▼  POST /query — HTTP REST, no client library needed
+     pfc-gateway  (this server)  ────────────► serves data
           │
           ▼  pfc_jsonl s3-fetch — HTTP Range requests
-     .pfc archives on S3
+     .pfc archives on S3 / local
           │
           ▼  only ~4% of the archive is read per query
      NDJSON stream back to client
 ```
 
-**One query → cold S3 data → back in seconds.** No re-import. No DuckDB.
+**One server. Ingest from any tool. Query from any tool.** No DuckDB, no custom plugins.
 
 ---
 
@@ -49,6 +57,78 @@ PFC_API_KEY=your-secret-key uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
 ```
 
 AWS credentials are read from the standard locations (`~/.aws/credentials`, environment variables, IAM role). No extra config needed.
+
+---
+
+## Ingest — receive data from any HTTP source
+
+Enable ingest by setting `PFC_INGEST_DIR`. The gateway appends rows to a buffer file
+and rotates it to a compressed `.pfc` file when a size or time threshold is reached.
+
+```bash
+# Start gateway with ingest enabled
+PFC_API_KEY=secret PFC_INGEST_DIR=/data/pfc \
+  uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
+```
+
+### Send rows with curl
+
+```bash
+# JSON array
+curl -s -X POST http://localhost:8765/ingest \
+  -H "X-API-Key: secret" \
+  -H "Content-Type: application/json" \
+  -d '[{"ts":"2026-04-21T10:00:00Z","level":"INFO","msg":"server started"}]'
+
+# NDJSON (Fluent Bit json_stream / Vector ndjson)
+printf '{"ts":"2026-04-21T10:00:01Z","level":"WARN","msg":"high cpu"}\n' | \
+  curl -s -X POST http://localhost:8765/ingest \
+  -H "X-API-Key: secret" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @-
+```
+
+### Fluent Bit HTTP output
+
+```ini
+[OUTPUT]
+    Name              http
+    Match             *
+    Host              your-server
+    Port              8765
+    URI               /ingest
+    Format            json          # sends JSON array — pfc-gateway auto-detects
+    Header            X-API-Key secret
+```
+
+### Vector HTTP sink
+
+```toml
+[sinks.pfc_gateway]
+type     = "http"
+inputs   = ["your_source"]
+uri      = "http://your-server:8765/ingest"
+encoding.codec = "ndjson"
+
+[sinks.pfc_gateway.request.headers]
+X-API-Key = "secret"
+```
+
+### Force-flush the buffer
+
+```bash
+curl -s -X POST http://localhost:8765/ingest/flush \
+  -H "X-API-Key: secret"
+# → {"flushed": true, "rows": 4821, "file": "/data/pfc/ingest_20260421T103045.pfc"}
+```
+
+### Check buffer status
+
+```bash
+curl -s http://localhost:8765/ingest/status -H "X-API-Key: secret"
+# → {"enabled": true, "buffer_rows": 142, "buffer_mb": 0.021,
+#    "last_flush_age_sec": 312.4, "rotate_mb": 64, "rotate_sec": 3600, ...}
+```
 
 ---
 
@@ -163,7 +243,9 @@ Both panels in the same Grafana dashboard. No re-import. No DuckDB.
 
 ## API Reference
 
-### `POST /query`
+### Query endpoints
+
+#### `POST /query`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -175,17 +257,42 @@ Both panels in the same Grafana dashboard. No re-import. No DuckDB.
 
 Returns: `application/x-ndjson` stream.
 
-### `POST /query/batch`
+#### `POST /query/batch`
 
 Same as `/query` but with `files: [...]` array instead of single `file`.
 
-### `GET /`
+#### `GET /`
 
-Health check. Returns `{"status": "ok", "version": "0.1.0"}`.
+Health check. Returns `{"status": "ok", "version": "0.2.0"}`.
+
+### Ingest endpoints
+
+#### `POST /ingest`
+
+Accepts rows in three formats (auto-detected):
+- JSON array: `[{...}, {...}]`
+- Object with rows key: `{"rows": [{...}, ...]}`
+- Raw NDJSON: `{...}\n{...}\n`
+
+Returns: `{"accepted": N}`
+
+Requires `PFC_INGEST_DIR` to be set (returns 503 otherwise).
+
+#### `POST /ingest/flush`
+
+Force-compresses the current buffer to a `.pfc` file immediately.
+
+Returns: `{"flushed": true, "rows": N, "file": "/path/to/ingest_<ts>.pfc"}` or `{"flushed": false, "reason": "empty"}`.
+
+#### `GET /ingest/status`
+
+Returns buffer statistics: row count, byte size, age since last flush, last output file, rotation thresholds.
 
 ---
 
 ## Environment Variables
+
+### Query / Auth
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -196,6 +303,15 @@ Health check. Returns `{"status": "ok", "version": "0.1.0"}`.
 | `PFC_PRESIGN_TTL` | `3600` | Pre-signed URL TTL in seconds |
 | `AWS_DEFAULT_REGION` | `eu-central-1` | AWS region for S3 |
 
+### Ingest
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PFC_INGEST_DIR` | *(none — ingest off)* | Directory for buffer + output `.pfc` files |
+| `PFC_INGEST_ROTATE_MB` | `64` | Rotate when buffer reaches this size (MB) |
+| `PFC_INGEST_ROTATE_SEC` | `3600` | Rotate when buffer is older than this (seconds) |
+| `PFC_INGEST_PREFIX` | `ingest` | Output filename prefix: `ingest_<ts>.pfc` |
+
 Standard AWS variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`) are respected automatically.
 
 ---
@@ -205,7 +321,7 @@ Standard AWS variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_PROFI
 ```ini
 # /etc/systemd/system/pfc-gateway.service
 [Unit]
-Description=pfc-gateway — PFC cold archive query server
+Description=pfc-gateway — PFC cold archive bidirectional gateway
 After=network.target
 
 [Service]
@@ -216,6 +332,9 @@ ExecStart=/usr/bin/uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
 Restart=on-failure
 Environment=PFC_API_KEY=your-secret-key
 Environment=AWS_DEFAULT_REGION=eu-central-1
+Environment=PFC_INGEST_DIR=/data/pfc          # omit to disable ingest
+Environment=PFC_INGEST_ROTATE_MB=64
+Environment=PFC_INGEST_ROTATE_SEC=3600
 
 [Install]
 WantedBy=multi-user.target
@@ -248,7 +367,8 @@ Your data sources
     │
     ├── pfc-migrate     (one-shot export)
     ├── pfc-archiver-*  (autonomous daemon)
-    └── pfc-fluentbit   (live pipeline)
+    ├── pfc-fluentbit   (live pipeline)
+    └── pfc-gateway     (POST /ingest ← NEW)  ← this repo
               │
               ▼
     .pfc archives (local / S3 / Azure / GCS)
@@ -262,6 +382,7 @@ SQL queries         HTTP REST
     │                    │
     ▼                    ▼
 Python / CLI        Grafana / PowerBI / curl / own tools
+                    Fluent Bit / Vector / Telegraf (ingest)
 ```
 
 | Tool | What | DuckDB needed |

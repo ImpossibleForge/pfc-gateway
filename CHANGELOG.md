@@ -1,5 +1,58 @@
 # Changelog — pfc-gateway
 
+## v0.2.0 (2026-04-21)
+
+### Added — Bidirectional ingest (`POST /ingest`)
+
+pfc-gateway now **receives** data in addition to serving it.
+Any tool with an HTTP output — Fluent Bit, Vector, Telegraf, curl — can push NDJSON
+directly to the gateway. Rows are buffered and compressed to `.pfc` files automatically.
+
+```bash
+# Send a batch of log rows
+curl -X POST http://localhost:8765/ingest \
+  -H "X-API-Key: secret" \
+  -H "Content-Type: application/json" \
+  -d '[{"ts":"2026-04-21T10:00:00Z","level":"INFO","msg":"hello"}]'
+```
+
+**Three new endpoints:**
+- `POST /ingest` — accept rows (JSON array, `{"rows":[...]}`, or raw NDJSON)
+- `POST /ingest/flush` — force-compress current buffer to a `.pfc` file immediately
+- `GET  /ingest/status` — buffer stats (rows, bytes, age, last output file)
+
+**Auto-rotation (configurable):**
+- Size threshold: flush when buffer reaches `PFC_INGEST_ROTATE_MB` (default 64 MB)
+- Time threshold: flush when buffer age exceeds `PFC_INGEST_ROTATE_SEC` (default 3600 s)
+- Background watchdog task checks every 60 s
+
+**Ingest environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PFC_INGEST_DIR` | *(none — ingest off)* | Directory for buffer and output `.pfc` files |
+| `PFC_INGEST_ROTATE_MB` | `64` | Size rotation threshold (MB) |
+| `PFC_INGEST_ROTATE_SEC` | `3600` | Time rotation threshold (seconds) |
+| `PFC_INGEST_PREFIX` | `ingest` | Output filename prefix (`ingest_<ts>.pfc`) |
+
+**Error safety:** if `pfc_jsonl compress` fails, the buffer is restored — no data lost.
+
+### Added — test suite for ingest
+
+`tests/test_ingest.py` — 38 tests covering all ingest scenarios:
+- Disabled mode (503), body format auto-detection (JSON array / `rows` object / NDJSON),
+  buffer writes, flush, status, size-based rotation, time-based watchdog, auth.
+
+**Total test count: 125 tests (87 + 38), all passing.**
+
+### Added — `--ingest-dir` CLI flag
+
+```bash
+python pfc_gateway.py --ingest-dir /data/pfc --api-key secret
+```
+
+---
+
 ## v0.1.1 (2026-04-20)
 
 ### Fixed
