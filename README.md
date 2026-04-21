@@ -401,6 +401,7 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 - [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot export and archive conversion
 - [pfc-fluentbit](https://github.com/ImpossibleForge/pfc-fluentbit) — live Fluent Bit → PFC pipeline
 - [pfc-duckdb](https://github.com/ImpossibleForge/pfc-duckdb) — DuckDB extension for SQL queries on PFC files
+- [pfc-vector](https://github.com/ImpossibleForge/pfc-vector) — high-performance Rust ingest daemon for Vector.dev and Telegraf
 
 ---
 
