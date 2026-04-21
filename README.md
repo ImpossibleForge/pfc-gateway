@@ -56,6 +56,8 @@ pip install fastapi uvicorn boto3 python-dateutil
 PFC_API_KEY=your-secret-key uvicorn pfc_gateway:app --host 0.0.0.0 --port 8765
 ```
 
+> **License note:** This tool requires the `pfc_jsonl` binary. `pfc_jsonl` is free for personal and open-source use — commercial use requires a separate license. See [pfc-jsonl](https://github.com/ImpossibleForge/pfc-jsonl) for details.
+
 AWS credentials are read from the standard locations (`~/.aws/credentials`, environment variables, IAM role). No extra config needed.
 
 ---
