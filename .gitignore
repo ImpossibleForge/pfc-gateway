@@ -14,3 +14,5 @@ build/
 # Env files (never commit API keys)
 .env
 *.env
+.pfc_buffer.jsonl
+.pfc_buffer.compressing
