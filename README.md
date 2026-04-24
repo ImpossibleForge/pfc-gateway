@@ -411,3 +411,11 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 
 *ImpossibleForge — [github.com/ImpossibleForge](https://github.com/ImpossibleForge)*
 *Contact: info@impossibleforge.com*
+
+---
+
+## License
+
+pfc-gateway (this repository) is released under the MIT License — see [LICENSE](LICENSE).
+
+The PFC-JSONL binary () is proprietary software — free for personal and open-source use. Commercial use requires a license: [info@impossibleforge.com](mailto:info@impossibleforge.com)
