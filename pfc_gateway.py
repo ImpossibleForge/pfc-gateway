@@ -1,5 +1,5 @@
 """
-pfc-gateway v0.2.0 — Bidirectional HTTP gateway for PFC cold archives.
+pfc-gateway v0.3.0 — Bidirectional HTTP gateway for PFC cold archives.
 
 Query side  — stream NDJSON out of PFC files (local or S3)
 Ingest side — receive NDJSON / JSON from any HTTP source and compress to PFC
@@ -8,6 +8,7 @@ Query endpoints
 ---------------
   POST /query        — query a single PFC file by time range, stream NDJSON
   POST /query/batch  — query multiple PFC files in one request
+  POST /query/sql    — execute SQL via DuckDB + pfc extension (optional, requires DuckDB)
 
 Ingest endpoints
 ----------------
@@ -53,7 +54,7 @@ Usage
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import asyncio
 import json
@@ -77,6 +78,8 @@ from pydantic import BaseModel, field_validator
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+DUCKDB_BINARY: str = os.environ.get("DUCKDB_BINARY", "duckdb")
 
 PFC_JSONL_BINARY: str = (
     os.environ.get("PFC_JSONL_BINARY")
@@ -491,9 +494,26 @@ class BatchQueryRequest(BaseModel):
 # Endpoints — query
 # ---------------------------------------------------------------------------
 
+def _duckdb_sql_available() -> bool:
+    """Check if DuckDB with pfc extension is usable for /query/sql."""
+    try:
+        r = subprocess.run(
+            [DUCKDB_BINARY, "-c", "LOAD pfc; SELECT 1;"],
+            capture_output=True, timeout=5
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 @app.get("/", dependencies=[Depends(require_api_key)])
 async def health():
-    return {"status": "ok", "version": __version__, "binary": PFC_JSONL_BINARY}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "binary": PFC_JSONL_BINARY,
+        "sql_mode": _duckdb_sql_available(),
+    }
 
 
 @app.post("/query", dependencies=[Depends(require_api_key)])
@@ -563,6 +583,83 @@ async def query_batch(req: BatchQueryRequest):
                 log.warning("Skipping %s: %s", f, exc)
 
     return StreamingResponse(_combined_gen(), media_type="application/x-ndjson")
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — SQL query (DuckDB + pfc extension)
+# ---------------------------------------------------------------------------
+
+class SqlQueryRequest(BaseModel):
+    sql: str
+
+
+@app.post("/query/sql", dependencies=[Depends(require_api_key)])
+async def query_sql(req: SqlQueryRequest):
+    """
+    Execute a SQL query via DuckDB with the pfc extension loaded.
+    Returns NDJSON — same format as /query for plugin compatibility.
+
+    Requirements: DuckDB binary in PATH (or DUCKDB_BINARY env) +
+                  pfc extension installed (INSTALL pfc FROM community).
+
+    Body:
+      sql : SQL query string, e.g.
+            "SELECT * FROM pfc_scan('/var/lib/pfc/logs.pfc')
+             WHERE json_extract_string(line, '$.level') = 'ERROR'"
+
+    Example:
+      curl -X POST http://localhost:8765/query/sql \\
+        -H "x-api-key: secret" -H "Content-Type: application/json" \\
+        -d '{"sql": "SELECT COUNT(*) FROM pfc_scan('\\''logs.pfc'\\'')"}'
+    """
+    if not req.sql or not req.sql.strip():
+        raise HTTPException(status_code=400, detail="sql field is required")
+
+    # Wrap in LOAD pfc to ensure extension is available
+    full_sql = f"LOAD pfc;\n{req.sql.strip()}"
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [DUCKDB_BINARY, "-json", "-c", full_sql],
+                capture_output=True, text=True, timeout=120
+            )
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"DuckDB binary not found: '{DUCKDB_BINARY}'. "
+                   "Install DuckDB and set DUCKDB_BINARY env var to enable SQL mode."
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="SQL query timed out (120s)")
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # DuckDB not having pfc extension is a specific, clear error
+        if "pfc" in stderr.lower() and ("not found" in stderr.lower() or "catalog" in stderr.lower()):
+            raise HTTPException(
+                status_code=503,
+                detail="pfc DuckDB extension not installed. "
+                       "Run: INSTALL pfc FROM community; in DuckDB."
+            )
+        raise HTTPException(status_code=400, detail=f"SQL error: {stderr[:500]}")
+
+    # DuckDB -json returns a JSON array — convert to NDJSON for consistency
+    try:
+        rows = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse DuckDB output")
+
+    if not isinstance(rows, list):
+        rows = [rows]
+
+    def _ndjson_gen():
+        for row in rows:
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(_ndjson_gen(), media_type="application/x-ndjson")
 
 
 # ---------------------------------------------------------------------------
