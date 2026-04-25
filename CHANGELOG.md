@@ -1,5 +1,56 @@
 # Changelog — pfc-gateway
 
+## v0.3.0 (2026-04-25)
+
+### Added — SQL query mode via DuckDB (`POST /query/sql`)
+
+pfc-gateway can now execute full SQL queries against `.pfc` archives using DuckDB
+with the pfc community extension — for users who already have DuckDB installed.
+
+```bash
+curl -X POST http://localhost:8765/query/sql \
+  -H "x-api-key: secret" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT json_extract_string(line, '\''$.level'\'') AS level, COUNT(*) AS cnt FROM pfc_scan('\''/var/lib/pfc/logs.pfc'\'') GROUP BY level ORDER BY cnt DESC"}'
+```
+
+**Two query paths — choose what fits your stack:**
+
+| Path | Endpoint | Requires | Use case |
+|------|----------|----------|----------|
+| Standard | `POST /query` | pfc_jsonl binary | Filter + time range, no DuckDB |
+| SQL | `POST /query/sql` | DuckDB + pfc extension | Full SQL, aggregations, JOINs |
+
+**New endpoint:**
+- `POST /query/sql` — execute SQL via DuckDB with pfc extension loaded. Returns NDJSON (same format as `/query`).
+  - `{"sql": "SELECT ..."}` — any valid DuckDB SQL with `pfc_scan()` or `read_pfc_jsonl()` as table source
+  - Returns HTTP 503 with clear message if DuckDB is not installed
+  - Returns HTTP 400 with SQL error details on syntax/runtime errors
+  - Timeout: 120s
+
+**Health response now includes `sql_mode`:**
+```json
+{"status": "ok", "version": "0.3.0", "binary": "/usr/local/bin/pfc_jsonl", "sql_mode": true}
+```
+`sql_mode: true` means DuckDB + pfc extension are available on this gateway instance.
+
+**Setup SQL mode:**
+```bash
+# Install DuckDB
+curl -L https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.gz | gunzip > /usr/local/bin/duckdb && chmod +x /usr/local/bin/duckdb
+
+# Install pfc extension
+duckdb -c "INSTALL pfc FROM community; LOAD pfc; SELECT 'ok';"
+```
+
+**Environment variable:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DUCKDB_BINARY` | `duckdb` | Path to DuckDB binary |
+
+---
+
 ## v0.2.0 (2026-04-21)
 
 ### Added — Bidirectional ingest (`POST /ingest`)
