@@ -1,27 +1,20 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "pfc-gateway"
-version = "0.1.0"
+version = "0.3.0"
 description = "HTTP REST query server for PFC cold archives — no DuckDB required"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = {text = "MIT"}
 requires-python = ">=3.10"
-keywords = ["pfc", "cratedb", "cold-storage", "grafana", "rest", "archive", "jsonl"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Database",
-    "Topic :: System :: Archiving",
-    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
-
+keywords = ["PFC", "CrateDB", "cold-storage", "Grafana", "REST", "archive", "JSONL"]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -33,10 +26,7 @@ dependencies = [
 s3 = ["boto3>=1.34"]
 all = ["boto3>=1.34"]
 
-[project.scripts]
-pfc-gateway = "pfc_gateway:app"
-
 [project.urls]
-Homepage    = "https://github.com/ImpossibleForge/pfc-gateway"
-Repository  = "https://github.com/ImpossibleForge/pfc-gateway"
-Issues      = "https://github.com/ImpossibleForge/pfc-gateway/issues"
+Repository = "https://github.com/ImpossibleForge/pfc-gateway"
+Issues = "https://github.com/ImpossibleForge/pfc-gateway/issues"
+
