@@ -211,6 +211,47 @@ Files are queried in order. Results stream back as a single combined NDJSON resp
 
 ---
 
+
+## SQL Query via DuckDB (optional)
+
+If DuckDB with the [pfc extension](https://github.com/ImpossibleForge/pfc-duckdb) is installed
+on the gateway server, you can run full SQL queries against `.pfc` archives:
+
+```bash
+curl -X POST http://localhost:8765/query/sql \
+  -H "x-api-key: secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT json_extract_string(line, '"'"'$.level'"'"') AS level, COUNT(*) AS cnt FROM pfc_scan('"'"'/var/lib/pfc/logs.pfc'"'"') GROUP BY level ORDER BY cnt DESC"
+  }'
+```
+
+Supports any DuckDB SQL — `GROUP BY`, `AVG`, `JOIN` across multiple files, window functions:
+
+```sql
+-- Avg latency per service, last hour
+SELECT json_extract_string(line, '$.service') AS service,
+       ROUND(AVG(json_extract(line, '$.latency_ms')::FLOAT), 1) AS avg_ms
+FROM pfc_scan('/var/lib/pfc/logs.pfc')
+GROUP BY service ORDER BY avg_ms DESC;
+```
+
+Check if SQL mode is available on your gateway instance:
+```bash
+curl http://localhost:8765/ -H "x-api-key: secret"
+# {"status":"ok","version":"0.3.0","binary":"...","sql_mode":true}
+```
+
+`sql_mode: false` means DuckDB is not installed — standard `/query` still works normally.
+
+**Setup:**
+```bash
+# Install DuckDB
+curl -L https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.gz \
+  | gunzip > /usr/local/bin/duckdb && chmod +x /usr/local/bin/duckdb
+# Install pfc extension
+duckdb -c "INSTALL pfc FROM community;"
+```
 ## Grafana Integration
 
 pfc-gateway implements the [Grafana SimpleJSON data source](https://grafana.com/grafana/plugins/grafana-simple-json-datasource/) protocol.
