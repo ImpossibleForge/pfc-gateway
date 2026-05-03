@@ -306,7 +306,7 @@ Same as `/query` but with `files: [...]` array instead of single `file`.
 
 #### `GET /`
 
-Health check. Returns `{"status": "ok", "version": "0.2.0"}`.
+Health check. Returns `{"status": "ok", "version": "0.3.0"}`.
 
 ### Ingest endpoints
 
