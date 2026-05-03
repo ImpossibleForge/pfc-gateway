@@ -1,5 +1,10 @@
 # pfc-gateway
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
+[![PFC-JSONL](https://img.shields.io/badge/PFC--JSONL-v3.4-green.svg)](https://github.com/ImpossibleForge/pfc-jsonl)
+[![Version](https://img.shields.io/badge/pfc--gateway-v0.3.0-brightgreen.svg)](https://github.com/ImpossibleForge/pfc-gateway/releases)
+
 **Bidirectional HTTP gateway for PFC cold archives — no DuckDB required.**
 
 pfc-gateway makes PFC archives on S3 (or local storage) queryable by **any tool** — Grafana, Python, curl, PowerBI — through a simple HTTP API. It also **receives** NDJSON from Fluent Bit, Vector, Telegraf, or any HTTP client and compresses it to `.pfc` archives automatically.
