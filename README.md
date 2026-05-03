@@ -443,17 +443,16 @@ Python / CLI        Grafana / PowerBI / curl / own tools
 
 ---
 
-## Related repos
+## Part of the PFC Ecosystem
 
-- [pfc-jsonl](https://github.com/ImpossibleForge/pfc-jsonl) — core binary (compress/decompress/query)
-- [pfc-migrate](https://github.com/ImpossibleForge/pfc-migrate) — one-shot export and archive conversion
-- [pfc-fluentbit](https://github.com/ImpossibleForge/pfc-fluentbit) — live Fluent Bit → PFC pipeline
-- [pfc-duckdb](https://github.com/ImpossibleForge/pfc-duckdb) — DuckDB extension for SQL queries on PFC files
-- [pfc-vector](https://github.com/ImpossibleForge/pfc-vector) — high-performance Rust ingest daemon for Vector.dev and Telegraf
-- [pfc-otel-collector](https://github.com/ImpossibleForge/pfc-otel-collector) — OpenTelemetry OTLP/HTTP log exporter
-- [pfc-kafka-consumer](https://github.com/ImpossibleForge/pfc-kafka-consumer) — Kafka / Redpanda consumer → PFC
-- [pfc-telegraf](https://github.com/ImpossibleForge/pfc-telegraf) — Telegraf HTTP output plugin → PFC
-- [pfc-grafana](https://github.com/ImpossibleForge/pfc-grafana) — Grafana data source plugin for PFC archives
+**[→ View all PFC tools & integrations](https://github.com/ImpossibleForge/pfc-jsonl#ecosystem)**
+
+| Direct integration | Why |
+|---|---|
+| [pfc-duckdb](https://github.com/ImpossibleForge/pfc-duckdb) | SQL alternative — query `.pfc` archives directly via DuckDB instead of HTTP |
+| [pfc-grafana](https://github.com/ImpossibleForge/pfc-grafana) | Grafana data source plugin that queries pfc-gateway |
+| [pfc-fluentbit](https://github.com/ImpossibleForge/pfc-fluentbit) | Send logs into pfc-gateway via Fluent Bit HTTP output |
+| [pfc-vector](https://github.com/ImpossibleForge/pfc-vector) | High-performance Rust alternative for ingest |
 
 ---
 
