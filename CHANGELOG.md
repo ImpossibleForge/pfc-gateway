@@ -1,5 +1,16 @@
 # Changelog — pfc-gateway
 
+## v0.3.1 (2026-05-14)
+
+### Enhanced — SQL mode diagnostic messages
+
+SQL mode (`POST /query/sql`) now recognises the common pattern of writing
+`FROM pfc` and responds with a clear, actionable hint pointing to the
+correct `read_pfc_jsonl('path/to/file.pfc')` syntax instead of a generic
+error. The check for a missing pfc extension is now precise — it matches
+only when the `read_pfc_jsonl()` function itself is unknown to DuckDB,
+not when a table name is wrong.
+
 ## v0.3.0 (2026-04-25)
 
 ### Added — SQL query mode via DuckDB (`POST /query/sql`)

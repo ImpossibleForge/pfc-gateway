@@ -1,5 +1,5 @@
 """
-pfc-gateway v0.3.0 — Bidirectional HTTP gateway for PFC cold archives.
+pfc-gateway v0.3.1 — Bidirectional HTTP gateway for PFC cold archives.
 
 Query side  — stream NDJSON out of PFC files (local or S3)
 Ingest side — receive NDJSON / JSON from any HTTP source and compress to PFC
@@ -54,7 +54,7 @@ Usage
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import asyncio
 import json
@@ -637,12 +637,24 @@ async def query_sql(req: SqlQueryRequest):
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        # DuckDB not having pfc extension is a specific, clear error
-        if "pfc" in stderr.lower() and ("not found" in stderr.lower() or "catalog" in stderr.lower()):
+        # Extension not installed: read_pfc_jsonl() function is unknown to DuckDB
+        if "read_pfc_jsonl" in stderr and (
+            "not found" in stderr.lower() or "does not exist" in stderr.lower()
+        ):
             raise HTTPException(
                 status_code=503,
                 detail="pfc DuckDB extension not installed. "
                        "Run: INSTALL pfc FROM community; in DuckDB."
+            )
+        # Common usage pattern: user wrote 'FROM pfc' instead of read_pfc_jsonl()
+        if "table with name pfc does not exist" in stderr.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Use read_pfc_jsonl('path/to/file.pfc') in your SQL query. "
+                    "Example: SELECT * FROM read_pfc_jsonl('/data/logs.pfc') "
+                    "WHERE json_extract_string(line, '$.level') = 'ERROR'"
+                )
             )
         raise HTTPException(status_code=400, detail=f"SQL error: {stderr[:500]}")
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "pfc-gateway"
-version = "0.3.0"
+version = "0.3.1"
 description = "HTTP REST query server for PFC cold archives — no DuckDB required"
 readme = "README.md"
 license = {text = "MIT"}
